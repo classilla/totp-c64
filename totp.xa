@@ -142,7 +142,7 @@ tntsc	lda 56334	; NTSC, turn off bit 7 for 60Hz
 	sta 56334
 
 	; draw progress bar, first in base colour from utime LSB
-	lda utime+7
+tcnvm	lda utime+7
 	sec
 	sbc #1		; need the PAST colour
 	and #7
@@ -173,7 +173,7 @@ dpb1	dex
 	bne dpb1
 
 	; convert remainder seconds to BCD, from Andrew Jacobs' routine
-tcnvm	sei
+	sei
 	sed
 	lda #0
 	sta totpb	; use as workspace
