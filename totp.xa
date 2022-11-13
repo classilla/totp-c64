@@ -126,18 +126,35 @@ totp:
 	lda #0
 	sta 198
 
-	; configure CIA TOD clock for timekeeping
+	; configure CIA #1 TOD clock for timekeeping
 	lda 56335
 	and #127	; don't set the alarm
 	sta 56335
-	; set PAL or NTSC clock timing
-	lda 678
-	beq tntsc	; NTSC
-	lda 56334	; PAL, turn on bit 7 for 50Hz
+	; set 50Hz or 60Hz timing using Silver Dream's method
+	; test with the TOD on CIA #2
+	; https://codebase64.org/doku.php?id=base:efficient_tod_initialisation
+	sei
+	lda #0
+	sta $dd08
+nplup	cmp $dd08
+	beq nplup
+	lda #255
+	sta $dd04
+	sta $dd05
+	lda #17
+	sta $dd0e
+	lda $dd08
+nplup0	cmp $dd08
+	beq nplup0
+	lda $dd05
+	cli
+	cmp #$51
+	bcs t60hz	; 60Hz on TOD pin
+	lda 56334	; 50Hz, turn on bit 7 for CIA #1
 	ora #128
 	sta 56334	
 	jmp tcnvm
-tntsc	lda 56334	; NTSC, turn off bit 7 for 60Hz
+t60hz	lda 56334	; 60Hz, turn off bit 7 for CIA #1
 	and #127
 	sta 56334
 

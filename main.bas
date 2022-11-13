@@ -1,6 +1,6 @@
 # ik should be set to totpsa, ah to utimah, ky to key and um to utimon
-10 poke56,32:clr:ky=12288:ik=16384:tc=ik+3:td=tc+3:ah=18895:am=ah+1:as=am+1
-20 um=21110:gosub2000:print"{Senhqqq}TOTP-C64 0.5 (C)2022 Cameron Kaiser"
+10 poke56,32:clr:ky=12288:ik=16384:tc=ik+3:td=tc+3:ah=18930:am=ah+1:as=am+1
+20 um=21145:gosub2000:print"{Senhqqq}TOTP-C64 0.5 (C)2022 Cameron Kaiser"
 #        ########################################
 30 print"All rights reserved. BSD license."
 40 print"http://oldvcr.blogspot.com/"

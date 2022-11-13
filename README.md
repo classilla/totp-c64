@@ -5,7 +5,7 @@ what's more secure than an airgapped 8-bit computer for keeping your secrets?
 
 This program demonstrates a cryptographic hash implementation on the 6502
 (SHA-1) and a message authentication code (HMAC) using that hash. It also
-demonstrates a quick and dirty analogue of timegm() for interfacing with
+demonstrates a quick and dirty analogue of `timegm()` for interfacing with
 real-time clocks. And it's actually useful, as given proper inputs it will
 faithfully generate timely and completely valid time-based one-time
 password (TOTP) codes for entry.
@@ -26,15 +26,15 @@ Build it from source (see below), or grab a copy from the Releases tab.
 Load it onto your Commodore 64, such as with an SD2IEC, or a transfer device
 like a ZoomFloppy to a real floppy disk, or an 1541 Ultimate-II or U2+. I
 use a U2 with a network connection, FTP the binary to the SD card, and then
-command the U2 to load it into the Commodore's memory. It LOADs and RUNs like
-a BASIC program (in fact, the main menu *is* a BASIC program).
+command the U2 to load it into the Commodore's memory. It `LOAD`s and
+`RUN`s like a BASIC program (in fact, the main menu *is* a BASIC program).
 
 You can opt to load a binary key from disk, or enter a temporary (unsaved)
 key in hexadecimal. If you load from a binary file, you can select the
 offset and the keylength. Why, any file could be a key ...
 
 With the key loaded, you can set the clock using either a connected device
-that supports the CMD real-time clock command (T-RA) or enter the time
+that supports the CMD real-time clock command (`T-RA`) or enter the time
 manually. Although the SD2IEC design supports a compatible RTC, note that many
 SD2IEC clone implementations do not implement the full specification. The menu
 will tell you if it got a valid response from the device.
@@ -64,7 +64,8 @@ The TOTP display depends on a working CIA Time-of-Day clock. If the bar
 does not advance, your CIA #1 may not be functioning correctly, or it may
 not be getting a proper TOD signal from the 9V AC line. This signal passes
 through a 2.7V Zener diode and a 74LS08 or 74LS14 or equivalent. If either
-is defective, the TOD clock will fail to advance.
+is defective, the TOD clock will fail to advance. The clock adjusts for
+either 50Hz or 60Hz mains.
 
 TOTP-C64 currently only supports the CMD real-time clock and compatible
 implementations, though other supported devices are in the works (and pull
