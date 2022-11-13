@@ -39,7 +39,7 @@
 370 get#1,a$:of=of-1:ifof>0then360
 380 ifstthenclose1:close15:print"Unexpected EOF (key)":goto50
 390 ifolthenget#1,a$:pokely,asc(a$):ly=ly+1:le=le-1:ifle>0goto380
-400 ifolthenprintol"byte key read":close1:close15:goto430
+400 ifolthenprintol"byte key read":close1:close15:sysik:goto430
 410 get#1,a$:pokely,asc(a$):ly=ly+1:le=le+1:ifst=0andle<64then410
 420 printle"byte key read":close1:close15:sysik
 430 print"{q}F1: new key":print"Get (C)MD T-RA time or":km=1
