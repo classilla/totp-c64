@@ -1,0 +1,532 @@
+
+/* given a CMD-style T-RA string DOW. MO/DA/YYR HR:MN:SE XM plus local timezone
+   turn it into big-endian 64-bit GMT Unix-epoch time divided by 30 as "half
+   minutes" (suitable for feeding directly to HMAC-SHA-1) and a remainder
+
+   also works with manual time entry, see separate entry point
+
+   (c)2022 cameron kaiser. all rights reserved. BSD license.
+   http://oldvcr.blogspot.com/
+   ckaiser@floodgap.com
+
+*/
+
+
+#ifdef TIME30_PROVIDE_JUMPTABLE
+; obtain time from CMD device or compatible implementation of "t-ra"
+; pass channel# of device providing time string in X
+; command should already have been sent to command channel
+	jmp cmuxtm
+; obtain time from manual entry (short circuits)
+; this must be in "big-endian split bcd" with month rolled back by one
+; as if it were read from the CMD drive "m m d d y y y y h h m m s s"
+; e.g., November 11, 2022 7;45;53PM = 1 0 1 1 2 0 2 2 1 9 4 5 5 3
+	jmp mauxtm
+#endif
+
+/* parameters */
+
+#ifldef utime
+; ass-U-me everything else is defined
+#else
+
+/* inparam: hours from UTC as a signed char */
+utimah	.byt 0
+/* inparam: minutes from UTC as a signed char (for wacky 0.5/0.75h TZs) */
+utimam	.byt 0
+/* inparam: subtract (non-zero) or add (zero) to get UTC
+   e.g.,  PST is -0800, so this should be zero to add 8.0h
+   e.g., ACDT is +1030, so this should be non-zero to take away 10.5h */
+utimas	.byt 0
+
+/* utimon is also an inparam. this is where time data is directly
+   deposited for manual time entry. */
+
+/* outparam: unix time UTC divided by 30 */
+utime	.byt 0, 0, 0, 0, 0, 0, 0, 0
+/* outparam: unix time UTC mod 30 */
+utimem	.byt 0
+
+#endif
+
+.(
+
+	chkin	= $ffc6
+	getin	= $ffe4
+	clrchn	= $ffcc
+
+&cmuxtm: /* get CMD time */
+
+	jsr chkin
+	; skip D O W .
+	jsr getin
+	jsr getin
+	jsr getin
+	jsr getin
+	; skip space
+	jsr getin
+
+#define ASCIIBCD(l) \
+	jsr getin:sec:sbc #48:sta l: \
+	jsr getin:sec:sbc #48:sta l+1
+
+	; get month and day
+	; unlike Unix months, this is 1-indexed
+	ASCIIBCD(month)
+	; take one away
+	lda month+1
+	beq monthbo	; must be October
+	dec month+1
+	jmp modun
+monthbo	lda #9
+	sta month+1
+	lda #0
+	sta month
+modun	jsr getin	; slash
+	ASCIIBCD(day)
+	jsr getin	; slash
+
+	; get year. for our purpose assume all years are 2000 or later
+	; VICE and some devices may give us a three digit year
+	lda #2
+	sta year
+	lda #0
+	sta year+1
+	ASCIIBCD(year+2)
+	jsr getin
+	cmp #32		; space
+	beq twody	; two digit year
+	; three digit year
+	ldx year+3
+	stx year+2
+	sec
+	sbc #48
+	sta year+3
+	jsr getin	; space
+
+	; get time
+twody	ASCIIBCD(hour)
+	jsr getin	; colon
+	ASCIIBCD(minute)
+	jsr getin	; colon
+	ASCIIBCD(second)
+	jsr getin	; space
+	jsr getin	; A/P
+	cmp #65
+	beq timam	; AM
+	; PM. if time less than 12, add 12
+	lda hour
+	beq add12
+	lda hour+1
+	cmp #2
+	beq timdun	; high noon
+add12	inc hour	; always add 10
+	lda hour+1
+	clc		; add 2
+	adc #2
+	sta hour+1
+	cmp #10
+	bcc timdun	; no decimal carry
+	sec
+	sbc #10
+	sta hour+1
+	inc hour	; decimal carry
+	jmp timdun
+	; AM. if time is 12, set to zero
+timam	lda hour
+	beq timdun
+	lda hour+1
+	cmp #2
+	bne timdun
+	lda #0
+	sta hour
+	sta hour+1
+timdun	jsr getin	; skip M
+	jsr getin	; skip CR
+	jsr clrchn	; done reading from channel
+
+	/* enter here for manual entry */
+&mauxtm:
+
+	/* get the days past epoch for this date */
+
+; all routines converge here
+daygm0	lda #0
+	ldx #7
+lup	sta utime,x
+	dex
+	bpl lup
+
+; multiply upper digit by 10, add to lower digit
+#define SBCDBYT(w) lda w:asl:asl:clc:adc w:asl:clc:adc w+1
+
+	; turn month into table index
+	SBCDBYT(month)
+	tay
+	lda montab,y	; index into month table (save in y)
+	tay
+	ldx monttab,y	; month/10
+	; roll year back if needed
+	beq nomrb	; not needed
+	lda year+3
+	beq mrb3
+	dec year+3
+	jmp nomrb
+mrb3	lda #9
+	sta year+3
+	lda year+2
+	beq mrb2
+	dec year+2
+	jmp nomrb
+mrb2	lda #9
+	sta year+2
+	lda year+1
+	beq mrb1
+	dec year+1
+	jmp nomrb
+mrb1	lda #9
+	sta year+1
+	dec year	; no fair using year zero
+
+	; compute (((month*306)+5)/10) from lookup table
+	; retrieve saved index from y
+nomrb	tya
+	asl
+	tay
+	lda m306tab,y
+	sta m306
+	lda m306tab+1,y
+	sta m306+1
+
+	; precompute year/100
+	; note that this won't work past the year 9999 ...
+	SBCDBYT(year)
+	tax		; stash it for next section
+	sta year100
+	; compute year/400
+	lsr
+	lsr
+	sta year400
+
+	; turn year into 16-bit quantity
+/*
+	lda #0
+	sta year16+1
+	; first lower two digits
+	SBCDBYT(year+2)
+	sta year16
+	; now add upper two digits 100 times
+	ldy #100
+yrhi1	txa	; get back year100
+	clc
+	adc year16
+	sta year16
+	lda year16+1
+	adc #0
+	sta year16+1
+	dey
+	bne yrhi1
+*/
+	; multiply upper two digits by 100 = 0110 0100
+	lda #0
+	sta year16s+1
+	stx year16s	; from above
+
+#define	LSHIFT16(t)	asl t:rol t+1
+#define	ADD16TO16(f,t)	lda f:clc:adc t:sta t:lda f+1:adc t+1:sta t+1
+	LSHIFT16(year16s)
+	LSHIFT16(year16s)	; x4
+	lda year16s
+	sta year16
+	lda year16s+1
+	sta year16+1
+	LSHIFT16(year16s)
+	LSHIFT16(year16s)
+	LSHIFT16(year16s)	; x32
+	ADD16TO16(year16s,year16)
+	LSHIFT16(year16s)	; x64 = 100
+	ADD16TO16(year16s,year16)
+	; and add lower digits
+	SBCDBYT(year+2)
+	clc
+	adc year16
+	sta year16
+	lda year16+1
+	adc #0
+	sta year16+1
+
+	; little endian quantities added to big endian 64-bit long long
+#define ADD24TO64(f,t) \
+	lda f:clc:adc t+7:sta t+7: \
+	lda f+1:adc t+6:sta t+6: \
+	lda f+2:adc t+5:sta t+5: \
+	lda t+4:adc #0:sta t+4: \
+	lda t+3:adc #0:sta t+3: \
+	lda t+2:adc #0:sta t+2: \
+	lda t+1:adc #0:sta t+1: \
+	lda t:adc #0:sta t
+#define	ADD16TO64(f,t) \
+	lda f:clc:adc t+7:sta t+7: \
+	lda f+1:adc t+6:sta t+6: \
+	lda t+5:adc #0:sta t+5: \
+	lda t+4:adc #0:sta t+4: \
+	lda t+3:adc #0:sta t+3: \
+	lda t+2:adc #0:sta t+2: \
+	lda t+1:adc #0:sta t+1: \
+	lda t:adc #0:sta t
+#define ADD8TO64(f,t) \
+	lda f:clc:adc t+7:sta t+7: \
+	lda t+6:adc #0:sta t+6: \
+	lda t+5:adc #0:sta t+5: \
+	lda t+4:adc #0:sta t+4: \
+	lda t+3:adc #0:sta t+3: \
+	lda t+2:adc #0:sta t+2: \
+	lda t+1:adc #0:sta t+1: \
+	lda t:adc #0:sta t
+
+	; multiply years by 365 (add it to time 256 times, then 109 times)
+	; 1 0110.1101
+/*
+	ldy #0
+a365l0	ADD16TO64(year16,utime)
+	dey
+	bne a365l0
+*/
+	; just do a shifted add by one byte
+	lda year16:clc:adc utime+6:sta utime+6: \
+	lda year16+1:adc utime+5:sta utime+5: \
+	lda utime+4:adc #0:sta utime+4: \
+	lda utime+3:adc #0:sta utime+3: \
+	lda utime+2:adc #0:sta utime+2: \
+	lda utime+1:adc #0:sta utime+1: \
+	lda utime:adc #0:sta utime
+
+/*
+	ldy #109
+a365l1	ADD16TO64(year16,utime)
+	dey
+	bne a365l1
+*/
+	ADD16TO64(year16,utime)		; x1
+	; create shifted version elsewhere since we need year16 again
+	; for the next add
+	lda #0
+	sta year16s+2
+	lda year16+1
+	sta year16s+1
+	lda year16
+	sta year16s
+#define	LSHIFT24(t)	asl t:rol t+1:rol t+2
+	LSHIFT24(year16s)
+	LSHIFT24(year16s)
+	ADD24TO64(year16s,utime)	; x4
+	LSHIFT24(year16s)
+	ADD24TO64(year16s,utime)	; x8
+	LSHIFT24(year16s)
+	LSHIFT24(year16s)
+	ADD24TO64(year16s,utime)	; x32
+	LSHIFT24(year16s)
+	ADD24TO64(year16s,utime)	; x64 = 109
+
+	; add year/4
+	lsr year16+1
+	ror year16
+	lsr year16+1
+	ror year16
+	ADD16TO64(year16,utime)
+
+	; subtract year/100 from utime
+	lda utime+7:sec:sbc year100:sta utime+7
+	lda utime+6:sbc #0:sta utime+6
+	lda utime+5:sbc #0:sta utime+5
+	lda utime+4:sbc #0:sta utime+4
+	lda utime+3:sbc #0:sta utime+3
+	lda utime+2:sbc #0:sta utime+2
+	lda utime+1:sbc #0:sta utime+1
+	lda utime:sbc #0:sta utime
+
+	; add year/400
+	ADD8TO64(year400,utime)
+
+	; add from 306 table
+	ADD16TO64(m306,utime)
+
+	; finally add the day of month
+	SBCDBYT(day)
+	sta day16
+	ADD8TO64(day16,utime)
+
+	; and rebase around the epoch
+	lda utime+7:sec:sbc epoch+2:sta utime+7
+	lda utime+6:sbc epoch+1:sta utime+6
+	lda utime+5:sbc epoch:sta utime+5
+	lda utime+4:sbc #0:sta utime+4
+	lda utime+3:sbc #0:sta utime+3
+	lda utime+2:sbc #0:sta utime+2
+	lda utime+1:sbc #0:sta utime+1
+	lda utime:sbc #0:sta utime
+	
+	; utime now contains days past Unix epoch in localtime
+
+	/* now compute time / 30 "half minutes" and mod 30 */
+
+	; multiply days past epoch by 2880 (86,400 divided by 30)
+	; multiply hours by 120 (3600 divided by 30) and sum
+	; multiply minutes by 2 (60 divided by 30) and sum
+	; if seconds < 30 time mod 30 = seconds
+	; else add one to time value, subtract 30 from seconds = time mod 30
+	; math is BIG ENDIAN
+
+	; x2880 = 1011 0100 0000
+
+	; compute seconds and minutes first. this is guaranteed to be < 256
+	; so we can work it in here without having to go through a full add.
+	SBCDBYT(minute)
+	asl		; x2
+	tax
+	SBCDBYT(second)
+	sta utimem
+	cmp #30
+	bcc nzrout
+	sec
+	sbc #30
+	sta utimem
+	inx		; x now has (minutes+seconds)/30, utimem has mod 30
+
+nzrout	stx stime+7
+	lda utime+7
+	sta stime+6
+	lda utime+6
+	sta stime+5
+	lda utime+5
+	sta stime+4
+	lda utime+4
+	sta stime+3
+	lda utime+3
+	sta stime+2
+	lda utime+2
+	sta stime+1
+	lda utime+1
+	sta stime		; x256 and initialize at the same time
+				; minutes and seconds becomes the new low byte
+	
+#define	LSHIFT64(t) asl t+7:rol t+6:rol t+5:rol t+4:rol t+3:rol t+2:rol t
+#define	ADD64TO64(f,t)	\
+	lda f+7:clc:adc t+7:sta t+7: \
+	lda f+6:adc t+6:sta t+6: \
+	lda f+5:adc t+5:sta t+5: \
+	lda f+4:adc t+4:sta t+4: \
+	lda f+3:adc t+3:sta t+3: \
+	lda f+2:adc t+2:sta t+2: \
+	lda f+1:adc t+1:sta t+1: \
+	lda f:adc t:sta t
+
+	LSHIFT64(utime)
+	LSHIFT64(utime)
+	LSHIFT64(utime)
+	LSHIFT64(utime)
+	LSHIFT64(utime)
+	LSHIFT64(utime)
+	ADD64TO64(utime,stime)	; x64
+	LSHIFT64(utime)
+	LSHIFT64(utime)
+	LSHIFT64(utime)		; (already did x256)
+	ADD64TO64(utime,stime)	; x512
+	LSHIFT64(utime)
+	LSHIFT64(utime)
+	ADD64TO64(stime,utime)	; x2048 = x2880
+
+	; we use a lookup table for hours * 120
+	SBCDBYT(hour)
+	asl
+	tay
+	lda h120tab,y
+	clc
+	adc utime+7
+	sta utime+7
+	iny
+	lda h120tab,y
+	adc utime+6
+	sta utime+6
+	lda utime+5
+	adc #0
+	sta utime+5
+	lda utime+4
+	adc #0
+	sta utime+4
+	lda utime+3
+	adc #0
+	sta utime+3
+	lda utime+2
+	adc #0
+	sta utime+2
+	lda utime+1
+	adc #0
+	sta utime+1
+	lda utime
+	adc #0
+	sta utime
+
+	/* adjust localtime to UTC and leave result in utime */
+
+	; compute number of half-minutes to remove or add
+	; mod does not need to be recalculated
+	lda utimah	; turn hour into index into 120-table
+	asl
+	tay
+	lda utimam	; minutes x2
+	asl
+	clc
+	adc h120tab,y	; hours x120
+	sta stime	; reuse shifted time area since we're done with it
+	iny
+	lda #0
+	adc h120tab,y
+	sta stime+1
+
+	lda utimas
+	bne slocal	; subtract
+	ADD16TO64(stime,utime)
+	rts
+slocal	; no point in a macro for this
+	lda stime:sec:sbc utime+7:sta utime+7
+	lda stime+1:sbc utime+6:sta utime+6
+	lda utime+5:sbc #0:sta utime+5
+	lda utime+4:sbc #0:sta utime+4
+	lda utime+3:sbc #0:sta utime+3
+	lda utime+2:sbc #0:sta utime+2
+	lda utime+1:sbc #0:sta utime+1
+	lda utime:sbc #0:sta utime
+
+	rts	
+
+	; all big endian
+	; must be contiguous
+&utimon = *
+month	.byt 0, 0
+day	.byt 0, 0
+year	.byt 0, 0, 0, 0
+; time in 24h
+hour	.byt 0, 0
+minute	.byt 0, 0
+second	.byt 0, 0
+
+	; work
+year100	.byt 0
+year400	.byt 0
+year16	.word 0
+year16s	.word 0,0
+m306	.word 0
+day16	.byt 0
+stime	.byt 0, 0, 0, 0, 0, 0, 0, 0
+
+	; tables
+montab	.byt 10,11,0,1,2,3,4,5,6,7,8,9
+monttab	.byt 0,0,0,0,0,0,0,0,0,0,1,1
+m306tab	.word 0,31,61,92,122,153,184,214,245,275,306,337
+h120tab	.word 0,120,240,360,480,600,720,840,960,1080,1200,1320,1440
+	.word 1560,1680,1800,1920,2040,2160,2280,2400,2520,2640,2760
+	; epoch daygm (big endian)
+epoch	.byt $0a, $fa, $6d
+
+.)

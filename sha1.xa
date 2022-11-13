@@ -1,0 +1,356 @@
+/* SHA-1 for 6502. this should run on pretty much any 6502.
+
+   (c)2022 cameron kaiser. all rights reserved. BSD license.
+   http://oldvcr.blogspot.com/
+   ckaiser@floodgap.com
+
+*/
+
+	/* things you can override */
+
+#ifldef sha1_zp0
+#else
+sha1_zp0	= $57	; 10 contiguous bytes useable for zero page pointers
+#endif
+
+#ifdef SHA1_DEBUG
+	; debugging will
+#ifldef chrout
+	; if you provide another routine, it must not clobber the Y register
+#else
+	; Commodore KERNAL CHROUT does not clobber the Y register
+chrout	= $ffd2
+#endif
+#endif
+
+#ifdef SHA1_PROVIDE_JUMPTABLE
+; call this routine to initialize a hash. to keep adding data to a hash,
+; don't call it between chunks.
+	jmp sha1_reset
+; call this routine to process a 512-bit (64 byte) chunk of data which has
+; been deposited in sha1_bytes. you are responsible for adding any data
+; to make the hash valid, such as setting a one bit at the end of data and
+; the terminal bit count (see the spec for details).
+	jmp sha1_chunk
+#endif
+
+	/* macros */
+
+#define	SHA1_LONG		.byt 0,0,0,0
+/* v = wwxxyyzz */
+#define	SHA1_LOAD32(v,w,x,y,z)	lda #w:sta v: \
+				lda #x:sta v+1: \
+				lda #y:sta v+2: \
+				lda #z:sta v+3
+/* y = x */
+#define	SHA1_COPY32(x,y)	lda x:sta y: \
+				lda x+1:sta y+1: \
+				lda x+2:sta y+2: \
+				lda x+3:sta y+3
+
+#define SHA1_3OP(op,x,y,z)	lda x+3:op y+3:sta z+3: \
+				lda x+2:op y+2:sta z+2: \
+				lda x+1:op y+1:sta z+1: \
+				lda x:op y:sta z
+/* z = x & y */
+#define SHA1_AND32(x,y,z)	SHA1_3OP(and,x,y,z)
+
+	/* words are big endian, as G-d intended */
+/* y = x << 8 */
+#define	SHA1_ROL32_8(x,y)	lda x+1:sta y: \
+				lda x+2:sta y+1: \
+				lda x+3:sta y+2: \
+				lda x:sta y+3
+/* x >>= 1 */
+#define	SHA1_ROR32(x)		lda x:lsr:ror x+1:ror x+2:ror x+3: \
+				bcc *+4:ora #128:sta x
+
+/* z = x + y */
+#define	SHA1_ADC32(x,y,z)	clc:SHA1_3OP(adc,x,y,z)
+
+	/* internal implementation */
+
+.(
+
+	/* these must be contiguous in memory */
+&sha1_h0	SHA1_LONG
+&sha1_h1	SHA1_LONG
+&sha1_h2	SHA1_LONG
+&sha1_h3	SHA1_LONG
+&sha1_h4	SHA1_LONG
+
+&sha1_bytes	.dsb 320, $00
+
+	/* these must also be contiguous in memory */
+temp	SHA1_LONG
+work	SHA1_LONG
+a_	SHA1_LONG
+b_	SHA1_LONG
+c_	SHA1_LONG
+d_	SHA1_LONG
+e_	SHA1_LONG
+f_	SHA1_LONG
+k_	SHA1_LONG
+
+index	= sha1_zp0
+index3	= sha1_zp0 + 2
+index8	= sha1_zp0 + 4
+index14	= sha1_zp0 + 6
+index16	= sha1_zp0 + 8
+
+#ifdef SHA1_DEBUG
+	; print 20 bytes as hex from the pointer given (clobbers a,x,y)
+hprint	ldy #0
+hprintl	lda (index16),y
+	lsr
+	lsr
+	lsr
+	lsr
+	clc
+	adc #$30
+	cmp #$3a
+	bcc *+4
+	adc #6
+	jsr chrout
+
+	lda (index16),y
+	and #$0f
+	clc
+	adc #$30
+	cmp #$3a
+	bcc *+4
+	adc #6
+	jsr chrout
+
+	iny
+	cpy #20
+	bne hprintl
+	rts
+#endif
+
+&sha1_reset:
+
+	/*
+	 * reset h0, h1, h2, h3, h4 to initial constants
+         */
+
+	SHA1_LOAD32(sha1_h0,$67,$45,$23,$01)
+	SHA1_LOAD32(sha1_h1,$ef,$cd,$ab,$89)
+	SHA1_LOAD32(sha1_h2,$98,$ba,$dc,$fe)
+	SHA1_LOAD32(sha1_h3,$10,$32,$54,$76)
+	SHA1_LOAD32(sha1_h4,$c3,$d2,$e1,$f0)
+	rts
+
+&sha1_chunk:
+
+	/* 
+	 * given the 512 bits stored in the first 64 bytes of sha1_bytes,
+	 * hash it and leave the result in h0 || h1 || h2 || h3 || h4
+	 */
+
+	/* extend the 16 32-bit words into eighty 32-bit words */
+	/* make pointers to index, index-3, index-8, index-14, index-16 */
+#define SHA1_XTENDZP(q,r) \
+	lda #>(sha1_bytes+64-q-q-q-q):sta r+1:\
+	lda #<(sha1_bytes+64-q-q-q-q):sta r
+	SHA1_XTENDZP(0,index)
+	SHA1_XTENDZP(3,index3)
+	SHA1_XTENDZP(8,index8)
+	SHA1_XTENDZP(14,index14)
+	SHA1_XTENDZP(16,index16)
+
+#define SHA1_CHAINEOR \
+	lda (index3),y:eor (index8),y:eor (index14),y:eor (index16),y
+
+	ldx #16
+exlup	ldy #3
+	SHA1_CHAINEOR
+	asl
+	sta (index),y
+
+	dey
+	SHA1_CHAINEOR
+	rol
+	sta (index),y
+
+	dey
+	SHA1_CHAINEOR
+	rol
+	sta (index),y
+
+	dey
+	SHA1_CHAINEOR
+	rol
+	sta (index),y
+
+	ldy #3
+	lda (index),y
+	adc #0
+	sta (index),y
+
+	; assumes x is zero page
+#define SHA1_ADD4(x) clc:lda x:adc #4:sta x:bcc *+5:inc x+1
+	SHA1_ADD4(index)
+	SHA1_ADD4(index3)
+	SHA1_ADD4(index8)
+	SHA1_ADD4(index14)
+	clc:lda index16:adc #4:sta index16:bcc *+4:inc index16+1
+
+	inx
+	cpx #80
+	bne exlup
+
+	/* set up a,b,c,d,e registers */
+	SHA1_COPY32(sha1_h0,a_)
+	SHA1_COPY32(sha1_h1,b_)
+	SHA1_COPY32(sha1_h2,c_)
+	SHA1_COPY32(sha1_h3,d_)
+	SHA1_COPY32(sha1_h4,e_)
+
+	/* rounds */
+	ldx #0
+	lda #<sha1_bytes
+	sta index
+	lda #>sha1_bytes
+	sta index+1
+
+round	cpx #20
+	bcs round20
+
+	; f = (b and c) or ((not b) and d)
+	; temp = (not b) and d
+	lda b_:eor #255:and d_:sta temp
+	lda b_+1:eor #255:and d_+1:sta temp+1
+	lda b_+2:eor #255:and d_+2:sta temp+2
+	lda b_+3:eor #255:and d_+3:sta temp+3
+	; f = (b and c) or temp
+	lda b_:and c_:ora temp:sta f_
+	lda b_+1:and c_+1:ora temp+1:sta f_+1
+	lda b_+2:and c_+2:ora temp+2:sta f_+2
+	lda b_+3:and c_+3:ora temp+3:sta f_+3
+
+	SHA1_LOAD32(k_,$5a,$82,$79,$99)
+	jmp dround
+
+round20	cpx #40
+	bcs round40
+
+	; f = b xor c xor d
+	lda b_:eor c_:eor d_:sta f_
+	lda b_+1:eor c_+1:eor d_+1:sta f_+1
+	lda b_+2:eor c_+2:eor d_+2:sta f_+2
+	lda b_+3:eor c_+3:eor d_+3:sta f_+3
+
+	SHA1_LOAD32(k_,$6e,$d9,$eb,$a1)
+	jmp dround
+
+round40	cpx #60
+	bcc round41
+
+round60 ; f = b xor c xor d
+	lda b_:eor c_:eor d_:sta f_
+	lda b_+1:eor c_+1:eor d_+1:sta f_+1
+	lda b_+2:eor c_+2:eor d_+2:sta f_+2
+	lda b_+3:eor c_+3:eor d_+3:sta f_+3
+
+	SHA1_LOAD32(k_,$ca,$62,$c1,$d6)
+	jmp dround
+
+round41	; f = (b and c) or (b and d) or (c and d)
+	; temp = c and d
+	SHA1_AND32(c_,d_,temp)
+	; work = b and d
+	SHA1_AND32(b_,d_,work)
+	; f = (b and c) or temp or work
+	lda b_:and c_:ora temp:ora work:sta f_
+	lda b_+1:and c_+1:ora temp+1:ora work+1:sta f_+1
+	lda b_+2:and c_+2:ora temp+2:ora work+2:sta f_+2
+	lda b_+3:and c_+3:ora temp+3:ora work+3:sta f_+3
+	
+	SHA1_LOAD32(k_,$8f,$1b,$bc,$dc)
+	; fall thru
+
+dround	; temp = (a << 5) + f + e + k + w[i]
+	; strength reduce to << 8 followed by >> 3
+	SHA1_ROL32_8(a_,temp)
+	SHA1_ROR32(temp)
+	SHA1_ROR32(temp)
+	SHA1_ROR32(temp)
+
+	SHA1_ADC32(temp,f_,temp)
+	SHA1_ADC32(temp,e_,temp)
+	SHA1_ADC32(temp,k_,temp)
+
+	ldy #3
+	clc
+	lda temp+3:adc (index),y:sta temp+3:dey
+	lda temp+2:adc (index),y:sta temp+2:dey
+	lda temp+1:adc (index),y:sta temp+1:dey
+	lda temp:adc (index),y:sta temp
+
+	; e = d
+	SHA1_COPY32(d_,e_)
+
+	; d = c
+	SHA1_COPY32(c_,d_)
+
+	; c = b << 30
+	; strength reduce to b >> 2
+	lda b_:lsr:sta c_
+	lda b_+1:ror:sta c_+1
+	lda b_+2:ror:sta c_+2
+	lda b_+3:ror:sta c_+3
+	bcc skipr
+	lda c_
+	ora #128
+	sta c_:skipr SHA1_ROR32(c_)
+
+	; b = a
+	SHA1_COPY32(a_,b_)
+
+	; a = temp
+	SHA1_COPY32(temp,a_)
+
+#ifdef SHA1_DEBUG
+	txa
+	pha
+	lda #<a_
+	sta index16
+	lda #>a_
+	sta index16+1
+	jsr hprint
+
+	; 20 bytes = 40 hex chars, no need for $0d on 40-column screens
+	pla
+	tax
+#endif
+
+	clc:lda index:adc #4:sta index:bcc *+4:inc index+1
+	inx
+	cpx #80
+	bcs dun
+	jmp round
+
+dun	; accumulate total
+	SHA1_ADC32(sha1_h0,a_,sha1_h0)
+	SHA1_ADC32(sha1_h1,b_,sha1_h1)
+	SHA1_ADC32(sha1_h2,c_,sha1_h2)
+	SHA1_ADC32(sha1_h3,d_,sha1_h3)
+	SHA1_ADC32(sha1_h4,e_,sha1_h4)
+
+#ifdef SHA1_DEBUG
+	lda #13
+	jsr chrout
+
+	; print the 160-bit hash
+	lda #<sha1_h0
+	sta index16
+	lda #>sha1_h0
+	sta index16+1
+	jsr hprint
+	lda #13
+	jsr chrout
+#endif
+
+	rts
+.)

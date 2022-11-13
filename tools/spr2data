@@ -1,0 +1,57 @@
+#!/usr/bin/perl -s
+
+# Converts a spr file to BASIC data statements or assembler .byt statements
+# (C)2022 Cameron Kaiser
+
+# starting line number
+$line ||= 5000;
+
+# emit byt statements or data statements
+$byt ||= 0; # data statements
+
+$count = 0;
+$scount = 0;
+
+sub template { ($byt) ? ".byt " : "$line data "; }
+$bline = &template;
+
+select(STDOUT); $|++;
+while(<>) {
+	chomp;
+	$count++;
+	next if (!length || /^#/);
+	$scount++;
+
+	die("length of line $count isn't 24: @{[ length ]}\n")
+		if (length != 24);
+	@w = ();
+	push(@w, substr($_, 0, 8));
+	push(@w, substr($_, 8, 8));
+	push(@w, substr($_, 16,8));
+
+	foreach(@w) {
+		@k = split('', $_);
+		$bit = 128;
+		$byte = 0;
+		foreach (@k) {
+			$byte |= $bit if ($_ ne '.' && $_ ne ' ');
+			$bit >>= 1;
+		}
+
+		if ((length($bline)+length(",$byte"))>78) {
+			$bline =~ s/,$//;
+			print STDOUT "$bline\n";
+			$line += 10;
+			$bline = &template;
+		}
+		$bline .= "$byte,";
+	}
+}
+
+if ($bline ne &template) {
+	$bline =~ s/,$//;
+	print STDOUT "$bline\n";
+}
+
+warn "warning: processed $scount lines, expected 21" if ($scount != 21);
+

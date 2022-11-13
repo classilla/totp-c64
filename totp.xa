@@ -1,0 +1,511 @@
+/* main loop for TOTP-C64 generator. requires setup from BASIC interface.
+   uses time.xa and sha1.xa as dependencies.
+
+   (c)2022 cameron kaiser. all rights reserved. BSD license.
+   http://oldvcr.blogspot.com/
+   ckaiser@floodgap.com/
+
+*/
+	.word $4000
+	* = $4000
+
+totpsa 	= *
+
+/* initialize keys for HMAC and sprite display */
+	jmp initkeys
+/* grab time from CMD device and start TOTP loop */
+	jmp totpcmd
+/* grab manually provided time and start TOTP loop */
+	jmp totpman
+
+	; 64 byte key padded with zeroes
+	; at least 192 bytes required
+key		= 12288
+
+	; where to deposit sprites (watch for VIC char ROM images)
+sprites		= 8192
+
+	; forward define
+sha1_zp0	= $57
+
+initkeys
+	; create ipad and opad from key
+	ipad = key + 64
+	opad = key + 128
+
+	ldx #63
+klup	lda key,x
+	tay
+	eor #92
+	sta opad,x
+	tya
+	eor #54
+	sta ipad,x
+	dex
+	bpl klup
+
+	; set up sprites
+
+	; padlock sprite
+	ldx #62
+klups	lda sprdat,x
+	sta sprites,x
+	dex
+	bpl klups
+
+	; number sprites - clear first
+	ldx #160
+	lda #0
+klupsc	dex
+	sta sprites+64,x
+	sta sprites+64+160,x
+	sta sprites+64+320,x
+	sta sprites+64+480,x
+	cpx #0
+	bne klupsc	; can't use bpl
+
+	; next, copy from char ROM and stretch
+	sei
+	lda $01
+	and #251
+	sta $01		; char ROM on
+
+tospr	= sha1_zp0
+	lda #$40
+	sta sha1_zp0
+	lda #$20
+	sta sha1_zp0+1
+
+	ldx #0		; index into character set
+	ldy #0		; index into current sprite
+
+klupsp	lda $d180,x	; the 0 glyph
+	sta (tospr),y	; stretch
+	iny
+	iny
+	iny
+	sta (tospr),y	; strrreeeettttcccchhhhh
+	iny
+	iny
+	iny
+	inx
+	cpy #48		; six bytes per glyph row, eight rows in a glyph
+	bne klupsp
+
+	lda tospr
+	clc
+	adc #64
+	sta tospr
+	lda tospr+1
+	adc #0
+	sta tospr+1
+	ldy #0		; advance to next sprite, reset index
+
+	cpx #80		; ten character shapes copied
+	bne klupsp	; no, keep going
+
+	; setup complete
+	lda $01
+	ora #4
+	sta $01
+	cli
+	rts
+
+totpcmd:
+	ldx #15
+	jsr cmuxtm
+	jmp totp
+
+totpman:
+	jsr mauxtm
+	; fall thru
+
+totp:
+
+	; flush keyboard buffer
+	lda #0
+	sta 198
+
+	; configure CIA TOD clock for timekeeping
+	lda 56335
+	and #127	; don't set the alarm
+	sta 56335
+	; set PAL or NTSC clock timing
+	lda 678
+	beq tntsc	; NTSC
+	lda 56334	; PAL, turn on bit 7 for 50Hz
+	ora #128
+	sta 56334	
+	jmp tcnvm
+tntsc	lda 56334	; NTSC, turn off bit 7 for 60Hz
+	and #127
+	sta 56334
+
+	; draw progress bar, first in base colour from utime LSB
+	lda utime+7
+	sec
+	sbc #1		; need the PAST colour
+	and #7
+	tax
+	inx		; no black
+	ldy #29
+dpb0	txa
+	sta 55296+605,y
+	lda #160
+	sta 1024+605,y
+	dey
+	bpl dpb0
+
+	; predict next colour
+	lda utime+7
+	and #7
+	clc
+	adc #1
+	sta ccol
+
+	; if remainder seconds, overpaint partially, unless there are none
+	ldx utimem
+	stx totpb
+	stx totpb+2	; save for destructive BCD conversion below
+	beq sclock
+dpb1	dex
+	sta 55296+605,x
+	bne dpb1
+
+	; convert remainder seconds to BCD, from Andrew Jacobs' routine
+tcnvm	sei
+	sed
+	lda #0
+	sta totpb	; use as workspace
+	sta totpb+1
+	ldx #8
+tcnvbt	asl totpb+2	; don't clobber utimem, we use it for the prog bar
+	lda totpb
+	adc totpb
+	sta totpb
+	lda totpb+1
+	adc totpb+1
+	sta totpb+1
+	dex
+	bne tcnvbt
+	cld
+	cli
+	
+	; start TOD clock as interval timer with that many seconds on
+sclock	lda #0
+	sta $dc0b
+	sta $dc0a
+	lda totpb	; guaranteed < 100
+	sta $dc09
+	lda #0
+	sta $dc08	; click!
+
+	; and loop until exited
+cycle
+
+	/* TOTP proceeds in four 512-byte chunks */
+
+	/* chunk 1: key padded to 64 bytes ^ 0x36. this is our ipad. */
+
+	ldx #63
+tlup0	lda ipad,x
+	sta sha1_bytes,x
+	dex
+	bpl tlup0
+
+	jsr sha1_reset
+	jsr sha1_chunk
+
+	/* chunk 2: time counter || 0x80 || 53 nulls || 0x02 || 0x40 */
+
+	; clear it first, we're lazy
+	ldx #61
+	lda #0
+tlup1	sta sha1_bytes,x
+	dex
+	cpx #7
+	bne tlup1
+tlup1b	lda utime,x
+	sta sha1_bytes,x
+	dex
+	bpl tlup1b
+
+	; load remainder
+	lda #128
+	sta sha1_bytes+8
+	lda #2
+	sta sha1_bytes+62
+	lda #64
+	sta sha1_bytes+63
+
+	; do NOT reset -- this is the same hash
+	jsr sha1_chunk
+
+	; stash hash for chunk 4
+	ldx #19
+tlup2	lda sha1_h0,x
+	sta stash,x
+	dex
+	bpl tlup2
+
+	/* chunk 3: key padded to 64 bytes ^ 0x5c. this is our opad. */
+	
+	ldx #63
+tlup3	lda opad,x
+	sta sha1_bytes,x
+	dex
+	bpl tlup3
+
+	jsr sha1_reset
+	jsr sha1_chunk
+
+	/* chunk 4: hash from chunk 2 || 0x80 || 41 nulls || 0x02 || 0xa0 */
+
+	ldx #61
+	lda #0
+tlup4	sta sha1_bytes,x
+	dex
+	cpx #19
+	bne tlup4
+tlup5	lda stash,x
+	sta sha1_bytes,x
+	dex
+	bpl tlup5
+
+	lda #128
+	sta sha1_bytes+20
+	lda #2
+	sta sha1_bytes+62
+	lda #160
+	sta sha1_bytes+63
+
+	; do NOT reset -- this is the same hash
+	jsr sha1_chunk
+
+	/* compute 6 digit TOTP result */
+
+	/* offset within h0 || h1 || h2 || h3 || h4 is h4[3] & 0xf
+	   take 32 bits, masking off the high bit (big-endian) for 31 bits */
+
+	ldy #3
+	lda sha1_h4,y
+	and #$0f
+	tay
+	lda sha1_h0,y
+	and #127
+	sta totpb
+	lda sha1_h0+1,y
+	sta totpb+1
+	lda sha1_h0+2,y
+	sta totpb+2
+	lda sha1_h0+3,y
+	sta totpb+3
+
+	/* the decimal version limit is 2**31, which is 10 digits.
+	   we'll use the zp area, which is 10 bytes long */
+	ldx #10
+	lda #0
+	dex
+	sta sha1_zp0,x
+	bne *-3
+
+	/* totp code is last 6 digits */
+
+#if(0)
+	/* long way: repeatedly subtract to compute decimal version */
+
+#define	DIGIT4(d,r,s,t,l,ll,lll) l=*: \
+	lda totpb:cmp #r:bcc lll:bne ll: \
+	lda totpb+1:cmp #s:bcc lll:bne ll: \
+	lda totpb+2:cmp #t:bcc lll:bne ll: \
+	ll=*: inc d: sec:\
+	lda totpb+2:sbc #t:sta totpb+2: \
+	lda totpb+1:sbc #s:sta totpb+1: \
+	lda totpb:sbc #r:sta totpb:jmp l: \
+	lll=*
+
+	/* no fourth byte because it's zero for these */
+	DIGIT4(sha1_zp0+0,$3b,$9a,$ca,bil,lio,ns) /* 1 000 000 000 */
+	DIGIT4(sha1_zp0+1,$05,$f5,$e1,hun,dre,dm) /*   100 000 000 */
+
+#define	DIGIT3(d,r,s,t,l,ll,lll) l=*: \
+	lda totpb:bne ll: \
+	lda totpb+1:cmp #r:bcc lll:bne ll: \
+	lda totpb+2:cmp #s:bcc lll:bne ll: \
+	lda totpb+3:cmp #t:bcc lll:bne ll: \
+	ll=*: inc d: sec:\
+	lda totpb+3:sbc #t:sta totpb+3: \
+	lda totpb+2:sbc #s:sta totpb+2: \
+	lda totpb+1:sbc #r:sta totpb+1: \
+	lda totpb:sbc #0:sta totpb:jmp l: \
+	lll=*
+
+	DIGIT3(sha1_zp0+2,$98,$96,$80,ten,mil,li) /*    10 000 000 */
+	DIGIT3(sha1_zp0+3,$0f,$42,$40,mll,ion,ss) /*     1 000 000 */
+	DIGIT3(sha1_zp0+4,$01,$86,$a0,hnd,red,th) /*       100 000 */
+
+#define	DIGIT2(d,s,t,l,ll,lll) l=*: \
+	lda totpb+1:bne ll: \
+	lda totpb+2:cmp #s:bcc lll:bne ll: \
+	lda totpb+3:cmp #t:bcc lll:bne ll: \
+	ll=*: inc d: sec:\
+	lda totpb+3:sbc #t:sta totpb+3: \
+	lda totpb+2:sbc #s:sta totpb+2: \
+	lda totpb+1:sbc #0:sta totpb+1:jmp l: \
+	lll=*
+
+	DIGIT2(sha1_zp0+5,$27,$10,tnt,hou,sd)     /*        10 000 */
+	DIGIT2(sha1_zp0+6,$03,$e8,tho,usa,nd)     /*         1 000 */
+
+#define	DIGIT1(d,t,l,ll,lll) l=*: \
+	lda totpb+2:bne ll: \
+	lda totpb+3:cmp #t:bcc lll:bne ll: \
+	ll=*: inc d: sec:\
+	lda totpb+3:sbc #t:sta totpb+3: \
+	lda totpb+2:sbc #0:sta totpb+2:jmp l: \
+	lll=*
+
+	DIGIT1(sha1_zp0+7,100,thr,eem,re)         /*           100 */
+	DIGIT1(sha1_zp0+8, 10,tog,oan,dw)         /*            10 */
+
+	; remainder is left in totpb+3
+	lda totpb+3
+	sta sha1_zp0+9
+
+#else
+
+	/* short way: convert it to BCD
+	   after Andrew Jacobs' routine, expanded to 32 bits
+	   http://www.6502.org/source/integers/hex2dec-more.htm */
+
+	sei	; need this to avoid crashing the C64
+	sed
+	ldx #32
+
+	; BIG ENDIAN!
+cnvbit	asl totpb+3	; shift out bit
+	rol totpb+2
+	rol totpb+1
+	rol totpb+0
+
+	; load into least significant bytes so that we can expand
+	; BIG ENDIAN!
+#define LAZAD(w) lda sha1_zp0+w:adc sha1_zp0+w:sta sha1_zp0+w
+	LAZAD(9)
+	LAZAD(8)
+	LAZAD(7)
+	LAZAD(6)
+	LAZAD(5)
+	dex
+	bne cnvbit
+
+	cld
+	cli
+
+	; break up the last three bytes into six digits
+#define BREKUP(w,x,y) \
+	lda sha1_zp0+w: \
+	tax:lsr:lsr:lsr:lsr: \
+	sta sha1_zp0+x: \
+	txa:and #$0f: \
+	sta sha1_zp0+y
+
+	BREKUP(7,4,5)
+	BREKUP(8,6,7)
+	BREKUP(9,8,9)
+
+#endif
+
+dundec
+#if(0)
+	lda #13
+	jsr $ffd2
+	ldy #4
+printlu	lda sha1_zp0,y
+	clc
+	adc #48
+	jsr $ffd2
+	iny
+	cpy #10
+	bne printlu
+
+	lda #13
+	jsr $ffd2
+#else
+	; set up sprites
+	ldy #4
+sprlu	lda sha1_zp0,y
+	clc
+	adc #129
+	sta 2036,y
+	iny
+	cpy #10
+	bne sprlu
+
+	lda #191
+	sta 53269
+#endif
+
+	; watch clock until next 30 second interval, advancing prog bar
+	ldx $dc09
+watchc	cpx $dc09
+	bne checkw
+	lda 631
+	cmp #133
+	beq exit
+	bne watchc
+checkw	ldy utimem
+	lda ccol
+	sta 55296+605,y
+	inc utimem
+	ldx $dc09
+	cpx #$30
+	bcc watchc
+
+	; increment utime
+	lda #1
+	clc
+	adc utime+7
+	sta utime+7
+	lda utime+6:adc #0:sta utime+6
+	lda utime+5:adc #0:sta utime+5
+	lda utime+4:adc #0:sta utime+4
+	lda utime+3:adc #0:sta utime+3
+	lda utime+2:adc #0:sta utime+2
+	lda utime+1:adc #0:sta utime+1
+	lda utime:adc #0:sta utime
+
+	; do again
+	lda utime+7
+	and #7
+	clc
+	adc #1
+	sta ccol	; next colour
+	lda #0
+	sta utimem	; no more remainder
+	sta $dc0b
+	sta $dc0a
+	sta $dc09
+	sta $dc08	; reset TOD timer entirely
+	jmp cycle
+
+	; F1 pressed
+exit	lda #0
+	sta 53269	; die sprites
+	lda #0
+	sta 198		; die keyboard buffer
+	lda #147
+	jmp $ffd2	; die screen, die everything
+
+totpb	.byt 0,0,0,0
+
+stash	.dsb 20,0
+
+ccol	.byt 0
+
+#include "sha1.xa"
+
+#include "time.xa"
+
+sprdat
+#include "spr.gen"

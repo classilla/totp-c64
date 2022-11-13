@@ -1,0 +1,502 @@
+#!/usr/bin/perl
+
+###############################################################################
+#
+# Commodore 64 BASIC linker for Perl links a BASIC program with a selection
+# of ML modules to make a one-part self-contained program. It can then be
+# fed into a crosspacker or crosscruncher (like pucrunch?) to make a small,
+# self-contained runnable "archive." In the spirit of Robert Stoerrle's
+# MODLink. Files are oriented for the C64.
+#
+# This program is (C)2006, 2022 Cameron Kaiser. All rights reserved.
+# This program is distributed under the Floodgap Free Software License.
+#
+###############################################################################
+
+BEGIN { $^H |= 0x00000008 unless ($] < 5.006); } # use bytes
+
+%lopts = ('version' => 'release version',
+	'ofile' => 'output filename',
+	'colwarn' => 'make memory collisions warnings only',
+	'big' => 'allow file to exceed 50K',
+	'debug' => 'debug flags',
+	);
+%args = ('version' => "*1.5.0",
+	'ofile' => 'apkg.prg',
+	'colwarn' => 'no',
+	'big' => 'no',
+	'debug' => '',
+	);
+
+warn <<"EOF";
+Commodore 64 BASIC Linker for Perl (c)2006, 2022 Cameron Kaiser.
+Distributed under the Floodgap Free Software License; see documentation.
+Use $0 --version for version string and help information.
+
+EOF
+
+undef %files;
+$increment = 1;
+
+while(scalar(@ARGV) && (($key, $value) = ($ARGV[0]
+                =~ /^--?([a-z]+)\=?(.+)?$/))) {
+        shift @ARGV;
+	if (!$lopts{$key}) { # try best match
+			my $gkey = undef;
+			my $xkey;
+
+			foreach $xkey (keys %lopts) {
+				if ($xkey =~ /^$key/i) {
+					die("Ambiguous option: $key")
+						if (defined $gkey);
+				$gkey = $xkey;
+			}
+		}
+		$key = $gkey || $key;
+	}       
+	if ($key eq 'version' && !length($value)) {
+		print <<"EOF";
+Version $args{'version'}
+Usage: $0 [--opt1[=value1] ...] \\
+	BASIC_program [resource1] [resource2] [...]
+(At least the BASIC_program must be specified. All additional resources must
+have starting addresses and will be moved to that location on RUN. The BASIC
+program is assumed to load to \$0801.)
+
+Supported options (short forms okay, yes/no's specified alone default to yes):
+EOF
+		foreach (sort keys %lopts) {
+			print <<"EOF";
+--$_: $lopts{$_}
+\tcurrently: $args{$_}
+EOF
+		}
+		exit;
+	}
+        die("Unrecognized option --$key.\n") if (!$lopts{$key});
+        die("Option --$key is read-only.\n") if ($args{$key}
+                =~ /^\*/);
+	$value ||= "yes" if ($args{$key} eq 'no' ||
+		$args{$key} eq 'yes');
+        die("No value specified for option --$key.\n") if (!$value);
+        $args{$key} = $value;
+        warn "Setting $lopts{$key} to $value.\n";
+}
+
+die("No BASIC program specified. Use --version for help.\n")
+	if (!scalar(@ARGV));
+
+undef $/;
+$basic = shift @ARGV;
+open(S, $basic) || die("Failed to open program $basic: $!\n");
+binmode(S);
+$k = scalar(<S>);
+close(S);
+$k = substr($k, 2);
+print STDOUT "Loaded ", ($eol=length($k)), " bytes of BASIC text.\n";
+printf(STDOUT "BASIC text allocated from %d (\$%04x) to %d (\$%04x).\n",
+	2049, 2049, 2049+$eol-1, 2049+$eol-1);
+$floaded = 0;
+
+# create block list by reading each file in, computing sa and ea, and then
+# making a sorted list with highest-loading files written out to the package
+# first. resolve collisions here (i.e., files overwriting other files, files
+# overwriting basic text). make these fatal unless --colwarn is yes.
+
+FROAD: while($next = shift @ARGV) {
+	my $k;
+
+	open(S, $next) || die("Failed to open resource $next: $!\n");
+	binmode(S);
+	$k = scalar(<S>);
+	close(S);
+	if (length($k) < 3) {
+		print STDOUT
+"Warning: $next seems empty (no starting address?). Skipping.\n";
+		next FROAD;
+	}
+	$sa = unpack('C', substr($k, 0, 1))+unpack('C', substr($k, 1, 1))*256;
+	$k = substr($k, 2);
+	$ea = $sa + length($k) - 1;
+	printf(STDOUT "Loaded %s (%d bytes) from %d (\$%04x) to %d (\$%04x).\n",
+		$next, length($k), $sa, $sa, $ea, $ea);
+	# check conflicts
+	foreach(keys %files) {
+		undef $complaint;
+
+		if ($sa < 679) {
+			$complaint =
+"Resources below 679 may conflict with relocator workspace.";
+		}
+		if (($sa >= hex($_) && $sa < (hex($_)+length($files{$_}))) ||
+		    ($ea >= hex($_) && $ea < (hex($_)+length($files{$_})))) {
+			$complaint =
+"Conflict with previously loaded resource.";
+		}
+		if (($sa >= 1024 && $sa < 2049+$eol) ||
+		    ($ea >= 1024 && $ea < 2049+$eol)) {
+			$complaint =
+"Conflict with relocator and/or BASIC program text.";
+		}
+		if ($complaint) {
+			if ($args{'colwarn'} =~ /y/) {
+				print STDOUT "** WARNING ** $complaint\n";
+			} else {
+				die(<<"EOF");
+$complaint
+To force packaging and convert this to a warning, use --colwarn. However,
+this may result in a defective object file.
+EOF
+			}
+		}
+	}
+	$files{sprintf("%04x", $sa)} = $k;
+	$floaded+= length($k);
+}
+if (!$floaded) {
+	print STDOUT "** WARNING ** No resources specified.\n";
+} else {
+	print STDOUT $floaded+$eol, " total bytes in raw binary data.\n";
+	if ($floaded+$eol+1280+2049 >= 53248) { # worst case
+		$complaint = <<'EOF';
+OVERSIZED ARCHIVE! Estimated size with all glue code included is > 50K!
+EOF
+		die(<<"EOF") unless ($args{'big'} =~ /y/);
+$complaint
+Aborting.
+
+If you think this is an erroneous estimate, or you will be using a loader
+that can load files beyond 53248 (\$d000) (or crunching the file such that
+it does not load this high), use --big to convert this to a warning. However,
+this may result in a defective object file.
+EOF
+		print <<"EOF";
+$complaint
+Converted to warning with --big, but you may need to use a custom loader or
+crunch the resulting object file to load it into memory!
+
+EOF
+	}
+}
+open(S, ">$args{'ofile'}") ||
+	die("Failed to create output file $args{'ofile'}: $!\n");
+binmode(S);
+print S chr(1).chr(8);
+print STDOUT "Creating runnable relocator.\n";
+
+# initial BASIC stub and first-stage relocator
+@stage1 = qw(
+	0b 08		#			#
+	0a 00 9e	# 10 sys		#
+	32 30 36 31	# 2061			#
+	00 00 00	#			#
+	a9 00		# lda #0		#
+	8d 20 d0	# sta $d020		#
+	8d 21 d0	# sta $d021		#
+	a9 0b		# lda #11		#
+	8d 11 d0	# sta $d011		#
+	a2 00		# ldx #0		#
+	bd x0 x1	# -lda $x0x1,x		(SA of stage 1 relocator) #
+	9d 00 04	# sta $0400,x		(this will always be $04) #
+	bd x0 X1	# lda $x0x1+256,x	(X1 autoincrements #
+	9d 00 05	# sta $0400+256,x		 x1 by 1) #
+	bd x0 X1	# lda $x0x1+512,x	#
+	9d 00 06	# sta $0400+512,x	#
+	bd x0 X1	# lda $x0x1+768,x	#
+	9d 00 07	# lda $0400+768,x	#
+	a9 00		# lda #0		#
+	9d 00 d8	# sta $d800,x		(this will always be $d8) #
+	9d 00 d9	# sta $d800+256,x	#
+	9d 00 da	# etc...		#
+	9d 00 db	#			#
+	e8		# inx			#
+	d0 d7		# bne -			#
+	78		# sei			#
+	a9 2c		# lda #$2c		#
+	85 01		# sta $01		(64K RAM config on) #
+	4c 00 04	# jmp $0400		#
+);
+
+# we're not ready for this yet but we need to know its length now. this is
+# the "backwalker" that takes a block of memory of integral page length
+# and moves it last byte first to a higher location. it lives in the input
+# buffer during 2nd stage, so it must be under 88 bytes.
+#
+# the backwalker assumes that number of pages to walk is in x, highest page
+# (i.e., end-256) is in $fd/fe, and highest page to move from (ie, srcend-256)
+# is in $fb/$fc.
+#
+@backwalker = qw(
+	a0 ff		# ldy #$ff		#
+	b1 fb		# -lda ($fb),y		#
+	91 fd		# sta ($fd),y		#
+	88		# dey			#
+	c0 ff		# cpy #$ff		#
+	d0 f7		# bne -			#
+	c6 fe		# dec $fe		#
+	c6 fc		# dec $fc		#
+	ca		# dex			#
+	d0 f0		# bne - 		(already $ff) #
+	60		# rts			#
+);
+
+# stage 1
+# first portion writes the stage 1 relocator, then the BASIC text minus
+# the relocator, and finally the portion overwritten by the relocator
+# after that.
+
+$st1l = &genlen(\@stage1); # length of stage 1
+$stbk = &genlen(\@backwalker); # length of backwalker
+$sas2 = 2049+$eol+$st1l+$stbk; # starting address of stage 2
+$rolend = 0;
+# (rolend is our rolling end-of-routine address, see stage 3-4)
+&generate(\@stage1, ($sas2 & 255), int($sas2/256));
+print S substr($k, $st1l);	# print remaining portion of BASIC
+print S substr($k, 0, $st1l);	# print portion "overwritten" by stage 1
+&generate(\@backwalker);
+
+# stage 2
+# replace BASIC text we "overwrote"
+
+$sas1 = 2049+$eol; # sa of text to replace
+$sabw = 2049+$eol+$st1l; # sa of backwalker
+@stage2 = qw(
+	a2 x0		# ldx #x0		#
+	bd x1 x2	# -lda $x1x2,x		(the text to be replaced) #
+	9d 01 08	# sta $0801,x		#
+	ca		# dex			#
+	10 f7		# bpl -			#
+	a2 x3		# ldx #x3		(now copy backwalker) #
+	bd x4 x5	# -lda $x4x5,x		#
+	9d 00 02	# sta $0200,x		#
+	ca		# dex			#
+	10 f7		# bpl -			#
+);
+$rolend += &genlen(\@stage2);
+$jumper = 1024 + &genlen(\@stage2);;	# jump back spot. we use this in s. 4.
+
+&generate(\@stage2, ($st1l-1), ($sas1 & 255), int($sas1/256),
+	($stbk-1), ($sabw & 255), int($sabw/256));
+
+# stage 3
+# first, compute the length of the second-stage relocator.
+# first any remainder for non-multiple of 256:
+#		ldx #(remainder)		2
+#		lda $x0x1,x			3 subtract 1 from address
+#		sta $x2x3,x			3 subtract 1 from address
+#		dex				1
+#		bne -				2 (so additional 11 bytes)
+# then
+#		lda #x0				2
+#		sta $fb				2
+#		lda #x1				2
+#		sta $fc				2
+#		lda #x2				2
+#		sta $fd				2
+#		lda #x3				2
+#		sta $fe				2
+#		ldx #pages			2
+#		jsr $0200			3 (so total 21 bytes if >256)
+
+foreach(reverse sort keys %files) {
+	my $n = length($files{$_});
+	my $j = $n % 256;
+	my $k = int($n/256);
+	my $l;
+
+	if (!$k) { # we assume that $j is positive, null files trapped before
+		$l = 11;
+	} else {
+		$l = 21 + (($j) ? 11 : 0);
+	}
+	$rolend += $l;
+	print STDOUT
+">>> stage 3 estimated size for $_ (len = $n) is $l (rolend = $rolend)\n"
+		if ($args{'debug'} =~ /s/);
+}
+
+# this isn't stage 4 yet, but we need the code here to compute its size too.
+@stage4 = qw(
+	a9 2f		# lda #$2f		#
+	85 01		# sta $01		(ROMs back on) #
+	58		# cli			(IRQs back on too) #
+	a9 1b		# lda #27		#
+	8d 11 d0	# sta $d011		#
+	a9 01		# lda #1		#
+	8d 86 02	# sta $0286		#
+	a9 x0		# lda #x0		#
+	85 2d		# sta $2d		#
+	a9 x1		# lda #x1		#
+	85 2e		# sta $2e		#
+	20 59 a6	# jsr $a659		#
+	# set up a dirty trick to allow us to clear the screen and not
+		crash by making the stack do the work #
+	a9 a7		# lda #$a7		hb on first ... #
+	48		# pha			... so it comes off last #
+	a9 ad		# lda #$ad		(a7ae-1) #
+	48		# pha			#
+	a9 93		# lda #$93		#
+	4c d2 ff	# jmp $ffd2		(and pulls a7ae off stack!) #
+);
+$rolend += &genlen(\@stage4);
+
+die(<<"EOF") if ($rolend > 1024);
+
+UNABLE TO CREATE AN ARCHIVE!! (generated second stage relocator > 1K in size)
+Reduce the number or size of linked resources. You may be able to concatenate
+contiguous resources into single files, or also reduce relocator size by
+using resources with sizes that are even multiples of 256.
+
+Bailing out with partial archive written.
+EOF
+
+$rolend += $sas2;
+print STDOUT ">>> stage 3 complete with resources planned for $rolend\n"
+	if ($args{'debug'} =~ /s/);
+
+# figure out where our file will end and roll rolend up to it because we
+# start relocating the *highmost* resource first.
+foreach(keys %files) { $rolend += length($files{$_}); }
+print STDOUT ">>> end of file expected to be $rolend\n"
+	if ($args{'debug'} =~ /s/);
+
+# stage 4
+# now, write out the fully generated relocator with our ending address in
+# rolend and walk backwards from the end relocating each resource. however,
+# this means we do this with remainder first, and then each page, counting
+# DOWN. this is where we use the backwalker.
+# (code reproduced again because I suffer from CRS disease)
+# first trailing remainder, done in full since faster and not much smaller:
+#		ldx #(remainder)		2
+#		lda $x0x1,x			3 subtract 1 from address
+#		sta $x2x3,x			3 subtract 1 from address
+#		dex				1
+#		bne -				2 (so additional 11 bytes)
+# then
+#		lda #x0				2
+#		sta $fb				2
+#		lda #x1				2
+#		sta $fc				2
+#		lda #x2				2
+#		sta $fd				2
+#		lda #x3				2
+#		sta $fe				2
+#		ldx #pages			2
+#		jsr $0200			3 (so total 21 bytes if >256)
+
+# we start using jumper again here.
+
+foreach(reverse sort keys %files) {
+	# notice we are recomputing everything again -- this is in case
+	# --colwarn made us try to work with overlapping code we can't tag.
+	my $n = length($files{$_});
+	my $j = $n % 256;
+	my $k = int($n/256);
+	my $l = hex($_);
+	
+	$rolend -= $n; # "walk backwards"
+	my $nrolend = $rolend;
+
+	print STDOUT
+">>> stage 4 on $_ (loc = $l) (len = $n) (rolend = $rolend) (jumper = $jumper)\n"
+		if ($args{'debug'} =~ /s/);
+
+	$nrolend += ($k * 256);
+	$l += $k * 256;
+	if ($j) {
+		print STDOUT ">> remainder: nrolend = $nrolend\n"
+			if ($args{'debug'} =~ /s/);
+		my @fragment = qw(
+			a2 x0		# ldx #$j	#
+			bd x1 x2	# lda x1x2,x	address-1 #
+			9d x3 x4	# sta x3x4,x	address-1 #
+			ca		# dex		#
+			d0 f7		# bne -		#
+		);
+		$nrolend--;
+		$l--;
+		&generate(\@fragment, $j, ($nrolend % 256), int($nrolend/256),
+			($l % 256), int($l/256));
+		$jumper += &genlen(\@fragment);
+		$nrolend++;
+		$l++;
+	}
+	if ($k) {
+		$nrolend -= 256;
+		$l -= 256;
+		print STDOUT ">> paged backwalk: nrolend = $nrolend\n"
+			if ($args{'debug'} =~ /s/);
+		my @fragment = qw(
+			a9 x0	 	# lda #x0	#
+			85 fb		# sta $fb	#
+			a9 x1		# lda #x1	#
+			85 fc 		# sta $fc	#
+			a9 x2		# lda #x2	#
+			85 fd		# sta $fd	#
+			a9 x3		# lda #x3	#
+			85 fe		# sta $fe	#
+			a2 x4		# ldx #$k	#
+			20 00 02	# jsr $0200	#
+		);
+		&generate(\@fragment,($nrolend % 256),int($nrolend/256),
+			($l % 256), int($l/256), $k);
+		$jumper += &genlen(\@fragment);
+	}
+}
+
+print STDOUT ">>> stage 4 generator finished!\n" if ($args{'debug'} =~ /s/);
+
+# ... and then the closing code ...
+
+$sas1 = 2049+$eol; # end of BASIC text for pointer at 45/46
+&generate(\@stage4, ($sas1 & 255), int($sas1/256));
+
+# ... and then write out all resources, lowest SA first
+foreach(sort keys %files) { print S $files{$_}; }
+
+# done!
+
+print STDOUT "Package successfully created.\n";
+close(S);
+exit;
+
+# this replaces "scalar" for stage hex dumps.
+sub genlen {
+	my $coderef = shift;
+	my $x = 0;
+	foreach(@$coderef) {
+		next if (/^#$/ ... /^#$/);
+		$x++;
+	}
+	return $x;
+}
+
+# this routine takes a hex dump and does the code generation and autoincrement
+# (or decrement) to make a relocated code section with hardcoded parameters
+# in the file.
+sub generate {
+	my $coderef = shift;
+	my @parms = @_;
+	my $x, $y, $z, $by;
+
+	$by = 0;
+	print STDOUT ">> generating code: @parms\n"
+		if ($args{'debug'} =~ /g/);
+	foreach(@$coderef) {
+		next if (/^#$/ ... /^#$/);
+		$by++;
+		if (/^([xX])(.)/) {
+			$x = $1;
+			$y = $2;
+			$parms[$y] += $increment if ($x eq 'X');
+			print S pack("c", $parms[$y]);
+			printf(STDOUT "%02x ", $parms[$y])
+				if ($args{'debug'} =~ /g/);
+			next;
+		}
+		print S pack("H2", $_);
+		print STDOUT "$_ " if ($args{'debug'} =~ /g/);
+	}
+	print STDOUT "\n>> end code generation phase (bytes = $by)\n"
+		if ($args{'debug'} =~ /g/);
+}

@@ -1,0 +1,187 @@
+#!/usr/bin/perl
+
+##############################################################################
+#
+# Commodore BASIC tokenizer routine converts ASCII text to PETSCII, tokenized
+# and fully executable BASIC 2.0 programs.
+#
+# This program is (C)1998, 2022 Cameron Kaiser.
+# This program is distributed under the Floodgap Free Software License.
+#
+##############################################################################
+
+BEGIN { $^H |= 0x00000008 unless ($] < 5.006); } # use bytes
+
+select(STDOUT); $|++;
+print STDOUT <<"EOF";
+Commodore BASIC 2.0 Tokenizer for Perl (c)1998, 2022 Cameron Kaiser
+Distributed under the Floodgap Free Software License; see documentation.
+Use $0 --version for version string and help information.
+
+EOF
+
+%lopts = ('sa' => 'object code starting address',
+	  'ofile' => 'object code filename',
+	  'debug' => 'debug information options',
+	  'echar' => 'extended character mapping',
+	  'version' => 'release version');
+%args = ('version' => "*1.0.1-perl5-spectre", 
+	 'sa' => '0800',
+	 'echar' => 'no',
+	 'ofile' => 'a.out');
+@ctcols = qw(144 5 28 159 156 30 31 158);
+%exctrs = ('!' => 129,
+		'@' => 149,
+		'#' => 150,
+		'$' => 151,
+		'%' => 152,
+		'^' => 153,
+		'&' => 154,
+		'*' => 155,
+		']' => 29,
+		'|' => 157);
+
+@tokens = (qw(end for next data input# input dim read let goto run if restore
+gosub return rem stop on wait load save verify def poke print# print cont list
+clr cmd sys open close get new), 'tab(', qw(to fn), 'spc(', qw(then not
+step + - * / ^ and or
+> = < sgn int abs usr fre pos sqr rnd log exp cos sin tan atn peek len str$
+val asc chr$ left$ right$ mid$));
+
+# go, truly a token, is not included here.
+
+foreach(@tokens) { push(@otokens, uc(quotemeta($_))); }
+
+while(scalar(@ARGV) && (($key, $value) = ($ARGV[0]
+                =~ /^--?([a-z]+)\=?(.+)?$/))) {
+        shift @ARGV;
+	if (!$lopts{$key}) { # try best match
+			my $gkey = undef;
+			my $xkey;
+
+			foreach $xkey (keys %lopts) {
+				if ($xkey =~ /^$key/i) {
+					die("Ambiguous option: $key")
+						if (defined $gkey);
+				$gkey = $xkey;
+			}
+		}
+		$key = $gkey || $key;
+	}       
+	if ($key eq 'version' && !length($value)) {
+		print <<"EOF";
+Version $args{'version'}
+Usage: $0 [--opt1[=value1] ...] [BASIC_text]
+
+If the filename for BASIC text is not given, input is taken on standard input.
+Supported options (short forms okay, yes/no's specified alone default to yes):
+EOF
+		foreach (sort keys %lopts) {
+			print <<"EOF";
+--$_: $lopts{$_}
+\tcurrently: $args{$_}
+EOF
+		}
+		exit;
+	}
+        die("Unrecognized option --$key.\n") if (!$lopts{$key});
+        die("Option --$key is read-only.\n") if ($args{$key}
+                =~ /^\*/);
+	$value ||= "yes" if ($args{$key} eq 'no' ||
+		$args{$key} eq 'yes');
+        die("No value specified for option --$key.\n") if (!$value);
+        $args{$key} = $value;
+        warn "Setting $lopts{$key} to $value.\n";
+}
+
+open(S, ">$args{'ofile'}") || die("Can't open output file $args{'ofile'}.\n");
+select(S); $|++; select(STDOUT); print S (chr(1), pack("H2", $args{'sa'}));
+$sa = hex($args{'sa'}); $sa *= 256 if ($sa < 256); $sa |= 1; $flinum = 0;
+
+IFILE: while(<>) {
+	$flinum++; $lbuf = ''; chomp;
+	if ($_ eq '#-echar') {
+		print STDOUT "Setting echar to y.\n";
+		$args{'echar'} = 'y';
+		next;
+	}
+	next if (/^#/ || /^$/);
+	print (STDOUT "$flinum:".(($args{'debug'} =~ /m/) ?
+		(sprintf("%x", $sa).":")
+		: "") .  "$_\n") if ($args{'debug'} =~ /v/);
+	tr/A-Za-z/a-zA-Z/;
+	unless ($args{'echar'} =~ /n/) {
+		s/%%/%25/g;
+		s/%([a-fA-F0-9][a-fA-F0-9])/pack("C", hex($1))/eg;
+	}
+	&cfatal("no line number -- immediate mode statements not permitted")
+		if (!(($lnum, $tail) = (/^([0-9]+) (.+)$/)));
+	$qmode = 0; $cmode = 0; $dmode = 0;
+	ICRUNCH: while ($tail !~ /^$/o) {
+		if (!$qmode) {
+			my $sem = 127;
+			foreach $token (@otokens) { 
+				$sem++;
+				# don't convert unary minus in DATA statements
+				next if ($sem == 171 && $dmode > 0);
+				($tail =~ s/^$token//) && ($lbuf .= chr($sem),
+					$dmode = (($sem eq 131) ? 1 : 0),
+					next ICRUNCH); 
+			}
+		}
+		$tail =~ s/^(.)//o; $c = &topet($1);
+		$dmode = 0 if ($c eq ':');
+		$lbuf .= $c;
+	}
+	$sa += length($lbuf) + 5;
+	$of = ($q = &hilo($sa)) . ($r = &hilo($lnum)) . $lbuf . chr(0);
+		print S ($of);
+	print STDOUT "\t" . unpack("H4", $q) . " " . unpack("H4", $r) . " " . 
+		unpack("H9000", $lbuf) . " 00\n" if ($args{'debug'} =~ /d/);
+}
+
+print S "\0\0";
+close(S);
+
+exit;
+
+sub tobyte {
+	my ($q) = (@_);
+	$q =~ s/\\//g; $q = lc $q; my $j = 0;
+	$j++ while ($q ne $tokens[$j] && $j < scalar(@tokens));
+	$j += 128;
+	&cwarn("encountered token '$q' [$j]") if ($args{'debug'} =~ /t/);
+	return chr($j);
+}
+
+sub topet {
+	my ($q) = (@_);
+	$qmode += ($q =~ /"/g); $qmode &= 1;
+	if ($q eq '{') { $cmode = 1; return undef; }
+	if ($q eq '}') { $cmode = 0; return undef; }
+	&cwarn("dumping character '$q' [quote=$qmode] [ctrl=$cmode]") if
+		($args{'debug'} =~ /p/);
+	if ($cmode) {
+		my $j = ord($q);
+		$j += 64;
+		$j -= 32 if ($q =~ /[a-z]/);
+		$j -= 128 if ($q =~ /[A-Z]/);
+		$j = $ctcols[($1-1)] if ($q =~ /([1-8])/);
+		$j = $exctrs{$q} if (defined $exctrs{$q});
+		$q = chr($j);
+	}
+	return $q;
+}
+
+sub hilo {
+	my ($q) = (@_);
+	return (chr($q & 255) . chr(int($q / 256)));
+}
+
+sub cfatal { &cwarn(@_); exit; }
+
+sub cwarn {
+	my $knum = ($lnum) ? "in line number $lnum" :
+		"no line number stated";
+	print STDOUT("line $flinum, $knum: @_\n");
+}
