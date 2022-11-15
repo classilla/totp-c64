@@ -106,7 +106,7 @@ Finally, the binary is compacted for efficiency and faster loading using
 portable and should compile easily on any modern system.
 
 If needed, first hange the `OBJ` in the `Makefile` to point to your desired
-destination, which by default is `../prgs/totp` (this is to suit my VICE
+destination, which by default is `../prg/totp` (this is to suit my VICE
 setup). Then just `make`.
 
 `pucrunch` is, strictly speaking, optional: if you don't have it, the build

@@ -489,8 +489,8 @@ nzrout	stx stime+7
 	ADD16TO64(stime,utime)
 	rts
 slocal	; no point in a macro for this
-	lda stime:sec:sbc utime+7:sta utime+7
-	lda stime+1:sbc utime+6:sta utime+6
+	lda utime+7:sec:sbc stime:sta utime+7
+	lda utime+6:sbc stime+1:sta utime+6
 	lda utime+5:sbc #0:sta utime+5
 	lda utime+4:sbc #0:sta utime+4
 	lda utime+3:sbc #0:sta utime+3
